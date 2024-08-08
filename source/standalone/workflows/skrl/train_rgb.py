@@ -17,11 +17,18 @@ import argparse
 
 from omni.isaac.lab.app import AppLauncher
 
+from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
+from skrl.memories.torch import RandomMemory
+from skrl.trainers.torch import SequentialTrainer
+
+from policies import Shared
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with skrl.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
+#parser.add_argument("--cpu", action="store_true", default=False, help="Use CPU pipeline.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -42,9 +49,10 @@ parser.add_argument(
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
+
 # parse the arguments
 args_cli = parser.parse_args()
-# always enable cameras to record video
+
 if args_cli.video:
     args_cli.enable_cameras = True
 
@@ -61,17 +69,6 @@ from datetime import datetime
 import skrl
 from skrl.utils import set_seed
 
-if args_cli.ml_framework.startswith("torch"):
-    from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
-    from skrl.memories.torch import RandomMemory
-    from skrl.trainers.torch import SequentialTrainer
-    from skrl.utils.model_instantiators.torch import deterministic_model, gaussian_model, shared_model
-elif args_cli.ml_framework.startswith("jax"):
-    from skrl.agents.jax.ppo import PPO, PPO_DEFAULT_CONFIG
-    from skrl.memories.jax import RandomMemory
-    from skrl.trainers.jax import SequentialTrainer
-    from skrl.utils.model_instantiators.jax import deterministic_model, gaussian_model
-
 from omni.isaac.lab.utils.dict import print_dict
 from omni.isaac.lab.utils.io import dump_pickle, dump_yaml
 
@@ -82,16 +79,13 @@ from omni.isaac.lab_tasks.utils.wrappers.skrl import SkrlVecEnvWrapper, process_
 
 def main():
     """Train with skrl agent."""
-    # configure the ML framework into the global skrl variable
-    if args_cli.ml_framework.startswith("jax"):
-        skrl.config.jax.backend = "jax" if args_cli.ml_framework == "jax" else "numpy"
 
     # read the seed from command line
     args_cli_seed = args_cli.seed
 
     # parse configuration
     env_cfg = parse_env_cfg(
-        args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric
+        args_cli.task, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric
     )
     experiment_cfg = load_cfg_from_registry(args_cli.task, "skrl_cfg_entry_point")
     
@@ -135,7 +129,7 @@ def main():
     # wrap for video recording
     if args_cli.video:
         video_kwargs = {
-            "video_folder": os.path.join(log_dir, "videos", "train"),
+            "video_folder": os.path.join(log_dir, "videos"),
             "step_trigger": lambda step: step % args_cli.video_interval == 0,
             "video_length": args_cli.video_length,
             "disable_logger": True,
@@ -153,43 +147,8 @@ def main():
     # instantiate models using skrl model instantiator utility
     # https://skrl.readthedocs.io/en/latest/api/utils/model_instantiators.html
     models = {}
-    if args_cli.ml_framework.startswith("jax"):
-        experiment_cfg["models"]["separate"] = True  # shared model is not supported in JAX
-
-    # non-shared models
-    if experiment_cfg["models"]["separate"]:
-        models["policy"] = gaussian_model(
-            observation_space=env.observation_space,
-            action_space=env.action_space,
-            device=env.device,
-            **process_skrl_cfg(experiment_cfg["models"]["policy"], ml_framework=args_cli.ml_framework),
-        )
-        models["value"] = deterministic_model(
-            observation_space=env.observation_space,
-            action_space=env.action_space,
-            device=env.device,
-            **process_skrl_cfg(experiment_cfg["models"]["value"], ml_framework=args_cli.ml_framework),
-        )
-
-    # shared models
-    else:
-        models["policy"] = shared_model(
-            observation_space=env.observation_space,
-            action_space=env.action_space,
-            device=env.device,
-            structure=None,
-            roles=["policy", "value"],
-            parameters=[
-                process_skrl_cfg(experiment_cfg["models"]["policy"], ml_framework=args_cli.ml_framework),
-                process_skrl_cfg(experiment_cfg["models"]["value"], ml_framework=args_cli.ml_framework),
-            ],
-        )
-        models["value"] = models["policy"]
-
-    # instantiate models' state dict
-    if args_cli.ml_framework.startswith("jax"):
-        for role, model in models.items():
-            model.init_state_dict(role)
+    models["policy"] = Shared(env.observation_space, env.action_space, env_cfg.sim.device, type="cnn_mix")
+    models["value"] = models["policy"]  # same instance: shared model
 
     # instantiate a RandomMemory as rollout buffer (any memory can be used for this)
     # https://skrl.readthedocs.io/en/latest/api/memories/random.html
@@ -204,6 +163,8 @@ def main():
 
     agent_cfg["state_preprocessor_kwargs"].update({"size": env.observation_space, "device": env.device})
     agent_cfg["value_preprocessor_kwargs"].update({"size": 1, "device": env.device})
+    agent_cfg["state_preprocessor"] = ""
+    agent_cfg["value_preprocessor"] = ""
 
     agent = PPO(
         models=models,

@@ -11,13 +11,15 @@ the observation introduced by the function.
 
 from __future__ import annotations
 
+import os
+
 import torch
 from typing import TYPE_CHECKING
 
 import omni.isaac.lab.utils.math as math_utils
 from omni.isaac.lab.assets import Articulation, RigidObject
 from omni.isaac.lab.managers import SceneEntityCfg
-from omni.isaac.lab.sensors import RayCaster
+from omni.isaac.lab.sensors import RayCaster, CameraCfg, TiledCameraCfg, Camera, TiledCamera, save_images_to_file
 
 if TYPE_CHECKING:
     from omni.isaac.lab.envs import ManagerBasedEnv, ManagerBasedRLEnv
@@ -115,7 +117,8 @@ def joint_pos_rel(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityC
     """
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    return asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    joint_pos_rel_state = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    return joint_pos_rel_state
 
 
 def joint_pos_limit_normalized(
@@ -151,13 +154,33 @@ def joint_vel_rel(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityC
     """
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    return asset.data.joint_vel[:, asset_cfg.joint_ids] - asset.data.default_joint_vel[:, asset_cfg.joint_ids]
+    joint_vel_rel_state = asset.data.joint_vel[:, asset_cfg.joint_ids] - asset.data.default_joint_vel[:, asset_cfg.joint_ids]
+    return joint_vel_rel_state
 
 
 """
 Sensors.
 """
 
+DEBUG = False
+def rgb_camera(env: ManagerBasedEnv, sensor_cfg: CameraCfg) -> torch.Tensor:
+    """RGB camera from give sensor w.r.t. the sensor's frame"""
+    sensor: Camera = env.scene.sensors[sensor_cfg.name]
+    rgb_data = sensor.data.output["rgb"].clone()
+    if DEBUG:
+        #print(rgb_data.shape)
+        import matplotlib.pyplot as plt
+        #$plt.imshow(rgb_data[0, ..., :-1].cpu().numpy())
+        rgb_data_np = rgb_data.cpu().numpy()
+        # fig, axes = plt.subplots(1, rgb_data_np.shape[0], figsize=(20, 20))
+        # for idx in range(rgb_data_np.shape[0]):
+        #     axes[idx].imshow(rgb_data_np[idx, ...], vmin=0, vmax=255)
+        
+        # plt.savefig(f"{os.getcwd()}/franka_list_cube_rgb_plt.jpg")
+        save_images_to_file(rgb_data[..., :-1].float() / rgb_data[..., :-1].max(), f"{os.getcwd()}/franka_list_cube_rgb.jpg")
+        print(f"{rgb_data_np.mean()}+-{rgb_data_np.std()}: [{rgb_data_np.min()}, {rgb_data_np.max()}]")
+    #raise("debug")
+    return rgb_data[..., :-1].reshape(rgb_data.shape[0], -1) # flatten for ppo
 
 def height_scan(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg, offset: float = 0.5) -> torch.Tensor:
     """Height scan from the given sensor w.r.t. the sensor's frame.
@@ -194,9 +217,11 @@ def last_action(env: ManagerBasedEnv, action_name: str | None = None) -> torch.T
     entire action tensor is returned.
     """
     if action_name is None:
-        return env.action_manager.action
+        last_action_state = env.action_manager.action
+        return last_action_state
     else:
-        return env.action_manager.get_term(action_name).raw_actions
+        last_action_state = env.action_manager.get_term(action_name).raw_actions
+        return last_action_state
 
 
 """
